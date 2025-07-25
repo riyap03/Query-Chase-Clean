@@ -2,24 +2,27 @@ import express from "express";
 import cors from "cors";
 import multer from "multer";
 import fs from "fs";
-import pdf from "pdf-extraction"; // Replacing pdf-parse with pdf-extraction
+import pdfParse from "pdf-parse/lib/pdf-parse.js";
 import dotenv from "dotenv";
 import OpenAI from "openai";
-import axios from "axios";
 
 dotenv.config();
 
 const app = express();
-app.use(
-  cors({
-    origin: "http://localhost:5173",
-    methods: "GET,POST",
-    allowedHeaders: "Content-Type",
-  })
-);
+app.use(cors({
+  origin: "http://localhost:5173",
+  methods: "GET,POST",
+  allowedHeaders: "Content-Type",
+}));
 app.use(express.json({ limit: "50mb" }));
 
 const PORT = process.env.PORT || 8000;
+
+// Check OpenAI API key
+if (!process.env.OPENAI_API_KEY) {
+  console.error("❌ OPENAI_API_KEY is missing in .env file!");
+  process.exit(1);
+}
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
@@ -36,8 +39,9 @@ app.post("/api/v1/upload", upload.single("file"), async (req, res) => {
     if (!req.file) return res.status(400).json({ error: "No file uploaded" });
 
     const pdfBuffer = fs.readFileSync(req.file.path);
-    const pdfData = await pdf(pdfBuffer); // Use pdf-extraction
-    fs.unlinkSync(req.file.path); // Remove temp file
+    const pdfData = await pdfParse(pdfBuffer);
+
+    fs.unlinkSync(req.file.path); // remove temp file
 
     return res.json({
       message: "File uploaded successfully",
@@ -50,51 +54,40 @@ app.post("/api/v1/upload", upload.single("file"), async (req, res) => {
 });
 
 // ===================
-// 2. HACKRX RUN
+// 2. ASK QUERY
 // ===================
 app.post("/api/v1/hackrx/run", async (req, res) => {
   try {
     const { documents, questions } = req.body;
-
-    if (!documents || !Array.isArray(questions)) {
-      return res.status(400).json({ error: "Invalid request format" });
+    if (!documents || !Array.isArray(questions) || questions.length === 0) {
+      return res.status(400).json({ error: "Both 'documents' and 'questions' are required." });
     }
 
-    // 1. Download PDF from the given URL
-    console.log("Downloading PDF...");
-    const response = await axios.get(documents, { responseType: "arraybuffer" });
-    const pdfBuffer = Buffer.from(response.data);
-
-    // 2. Extract text from PDF
-    console.log("Extracting text from PDF...");
-    const pdfData = await pdf(pdfBuffer);
-    const pdfText = pdfData.text;
-
-    // 3. Create a prompt for the AI model
+    // Just sending the URL as "context" (OpenAI can't read PDFs directly!)
+    const context = `Document URL: ${documents}`;
     const prompt = `
-    You are given a policy document and a list of questions.
-    Document:
-    ${pdfText}
-
-    Questions:
-    ${questions.map((q, i) => `${i + 1}. ${q}`).join("\n")}
-
-    Provide clear and concise answers for each question.
+      Context: ${context}
+      Questions: ${questions.join(", ")}
+      Answer concisely using ONLY the context above.
     `;
 
-    // 4. Query OpenAI
-    console.log("Querying OpenAI...");
+    console.log("🔍 Sending prompt to OpenAI...");
+
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [{ role: "user", content: prompt }],
+      max_tokens: 256,
+      temperature: 0.2,
     });
 
-    const answersText = completion.choices[0].message.content;
-
-    res.json({ answers: answersText.split("\n").filter(a => a.trim() !== "") });
+    const answer = completion.choices[0]?.message?.content || "No answer generated.";
+    res.json({ answer });
   } catch (err) {
-    console.error("HackRX Run Error:", err);
-    res.status(500).json({ error: "Failed to process document" });
+    console.error("hackrx/run error:", err.response?.data || err.message || err);
+    return res.status(500).json({
+      error: "Failed to generate answer",
+      details: err.response?.data || err.message,
+    });
   }
 });
 
@@ -109,14 +102,5 @@ app.get("/api/v1/test", (req, res) => {
 // START SERVER
 // ===================
 app.listen(PORT, () => {
-  console.log(`🚀 Server running at http://localhost:${PORT}/api/v1`);
+  console.log(`🚀 Server running at http://localhost:${PORT}`);
 });
-
-
-
-
-
-
-
-
-
